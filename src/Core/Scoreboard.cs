@@ -1,8 +1,8 @@
-namespace GameTemplate.Core;
+namespace SeaBattle.Core;
 
 /// <summary>
 /// Wins for two sides across a session. Rules code lives in Core: plain C# with no Godot types,
-/// so it is unit tested without the engine (see tests/GameTemplate.Tests).
+/// so it is unit tested without the engine (see tests/SeaBattle.Tests).
 /// </summary>
 public sealed class Scoreboard
 {

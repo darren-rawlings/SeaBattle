@@ -1,7 +1,7 @@
-using GameTemplate.Core;
+using SeaBattle.Core;
 using Xunit;
 
-namespace GameTemplate.Tests;
+namespace SeaBattle.Tests;
 
 public class ScoreboardTests
 {
