@@ -12,6 +12,22 @@ public sealed record Ship(string Name, int Length, int Row, int Column, bool Acr
 		for (int i = 0; i < Length; i++)
 			yield return (Row + (Across ? 0 : i)) * Fleet.Size + Column + (Across ? i : 0);
 	}
+
+	/// <summary>The same ship with its first square at (row, column), pushed back inside the grid if need be.</summary>
+	public Ship At(int row, int column)
+	{
+		int maxRow = Fleet.Size - (Across ? 1 : Length);
+		int maxColumn = Fleet.Size - (Across ? Length : 1);
+		return this with { Row = Math.Clamp(row, 0, maxRow), Column = Math.Clamp(column, 0, maxColumn) };
+	}
+
+	/// <summary>The ship turned a quarter about one of its squares (counted from the first), kept inside the grid.</summary>
+	public Ship Turned(int pivot)
+	{
+		int row = Row + (Across ? 0 : pivot), column = Column + (Across ? pivot : 0);
+		var turned = this with { Across = !Across };
+		return turned.Across ? turned.At(row, column - pivot) : turned.At(row - pivot, column);
+	}
 }
 
 public enum ShotResult
@@ -75,6 +91,16 @@ public sealed class Fleet
 			}
 		}
 		return ship.Squares().All(square => !taken.Contains(square));
+	}
+
+	/// <summary>Moves or turns one of the ships (placing your fleet by hand), if the new spot is clear.</summary>
+	public bool TryReplace(Ship old, Ship moved)
+	{
+		int index = _ships.IndexOf(old);
+		if (index < 0 || !CanPlace(moved, ignoring: old))
+			return false;
+		_ships[index] = moved;
+		return true;
 	}
 
 	public void Place(Ship ship)

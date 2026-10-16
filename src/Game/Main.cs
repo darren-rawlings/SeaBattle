@@ -17,8 +17,10 @@ namespace SeaBattle.Game;
 /// Sea Battle against the computer. Two seas lie on the table: the enemy's (far, hidden) and yours
 /// (near, with your fleet showing). Tap a square of the enemy sea to fire: a shell arcs over and
 /// lands with a splash (miss) or a burst of fire on a red peg (hit). Sinking a ship raises it out of
-/// the water for a moment, burning, then it sinks with a groan (the signature "sinking"). Before the
-/// battle, Shuffle rearranges your fleet. Drag sideways to spin the board.
+/// the water for a moment, burning, then it sinks (the signature "sinking"). Before the battle, drag
+/// your ships to place them (tap one to turn it), or press Randomize. The sounds are synthesised:
+/// the cannon's boom, a splash for a miss, a clang for a hit, an explosion for a sinking. Drag the
+/// table sideways to spin the board.
 /// </summary>
 public partial class Main : Node3D
 {
@@ -41,6 +43,7 @@ public partial class Main : Node3D
 	private readonly Scoreboard _wins = new();
 	private readonly List<Node3D> _markers = new();
 	private readonly Dictionary<Ship, Node3D> _homeHulls = new();
+	private readonly Dictionary<Ship, Node3D> _enemyHulls = new();
 	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
 	private readonly ComputerTurn _computer = new();
 	private readonly System.Random _random = new();
@@ -55,14 +58,25 @@ public partial class Main : Node3D
 	private SpinControl _spin = null!;
 	private MeshInstance3D _deck = null!;
 	private Button _shuffle = null!;
+	private FleetLegend _legend = null!;
+	private readonly List<Flames> _fires = new();
 	private bool _started;
 	private bool _busy;
 	private bool _playerTurn = true;
 	private bool _over;
 	private int _shots;
 
+	/// <summary>The battle's synthesised sounds, a few variations of each.</summary>
+	private AudioStreamWav[] _cannon = null!, _splash = null!, _hitSound = null!, _explosion = null!;
+
+	/// <summary>While placing your fleet: the ship held, which of its squares is under the finger, and where it would go.</summary>
+	private Ship? _held;
+	private int _heldPivot;
+	private Ship? _heldTarget;
+
 	private bool _demo;
 	private bool _quitAfterDemo;
+	private string? _clip;
 	private float _initialSpin;
 	private ComputerPlayer? _demoGunner;
 
@@ -74,9 +88,9 @@ public partial class Main : Node3D
 		ReadDeveloperArgs();
 		AudioServer.SetBusMute(0, _settings.Muted);
 
-		_camera = new Camera3D { Position = new Vector3(0, 12.6f, 6.2f), Fov = 50 };
+		_camera = new Camera3D { Position = new Vector3(0, 12.6f, 6.2f), Fov = 60 };
 		AddChild(_camera);
-		_camera.LookAt(new Vector3(0, -0.4f, 0.6f));
+		_camera.LookAt(new Vector3(0, -0.4f, 0.25f));
 		Stage.Build(this, -Thickness, new Color("0d1a24"));
 		_rig = new Node3D();
 		AddChild(_rig);
@@ -98,18 +112,13 @@ public partial class Main : Node3D
 
 		_hud = new GameHud(theme);
 		AddChild(_hud);
-		_hud.Build(new HudOptions(Title, "Tap the far sea to fire  ·  Drag sideways to spin", PiecesLabel: "Ships",
+		_hud.Build(new HudOptions(Title, "Drag a ship to move it, tap it to turn", PiecesLabel: "Ships",
 			PieceName: s => s switch { Style.Plastic => "Plastic", Style.Wood => "Wood", Style.Metal => "Steel", Style.Glass => "Glass", _ => "Marble" },
-			UndoText: "Radar (ad)", LevelOnly: true),
-			_settings.Muted, GameMode.PlayerVsComputer, _settings.Difficulty, _settings.Board, _settings.Pieces);
+			UndoText: "Radar (ad)", LevelOnly: true), _settings);
 		_hud.NewGamePressed += OnNewGamePressed;
 		_hud.UndoPressed += OnRadarPressed;
-		_hud.MuteToggled += muted =>
-		{
-			_settings.Muted = muted;
-			AudioServer.SetBusMute(0, muted);
-			_settings.Save();
-		};
+		_hud.RestartPressed += OnRestartPressed;
+		_hud.SetTutorial(Tutorial.Pages);
 		_hud.ModeChosen += (_, difficulty) =>
 		{
 			_settings.Difficulty = difficulty;
@@ -130,37 +139,50 @@ public partial class Main : Node3D
 			DrawHomeFleet();
 		};
 
-		var layer = new CanvasLayer();
-		AddChild(layer);
-		_shuffle = new Button { Text = "Shuffle fleet", FocusMode = Control.FocusModeEnum.None };
-		_shuffle.AddThemeFontSizeOverride("font_size", 26);
-		foreach (var state in new[] { "normal", "hover", "pressed", "hover_pressed" })
-		{
-			var box = new StyleBoxFlat { BgColor = theme.ButtonDark, AntiAliasing = true };
-			box.SetCornerRadiusAll(32);
-			box.SetContentMarginAll(12);
-			_shuffle.AddThemeStyleboxOverride(state, box);
-		}
-		_shuffle.SetAnchorsPreset(Control.LayoutPreset.CenterBottom);
-		_shuffle.OffsetLeft = -140;
-		_shuffle.OffsetRight = 140;
-		_shuffle.OffsetTop = -192;
-		_shuffle.OffsetBottom = -132;
+		_shuffle = _hud.AddButton("Randomize", false, Control.LayoutPreset.CenterBottom, -140, 140, -192, -132, 26);
 		_shuffle.Pressed += () =>
 		{
-			if (_started)
+			if (_started || _held != null)
 				return;
 			_home.Clear();
 			_home.PlaceRandomly(_random);
 			DrawHomeFleet();
 			Clack(HomeCenter, 0.5f);
 		};
-		layer.AddChild(_shuffle);
 
-		_spin = new SpinControl(_rig, () => !_busy);
+		// The enemy ships left to sink, under the top buttons; on its own layer so clips show it.
+		var legendLayer = new CanvasLayer { Layer = 0 };
+		AddChild(legendLayer);
+		_legend = new FleetLegend();
+		Widgets.Anchor(_legend, Control.LayoutPreset.TopWide, left: 20, right: -20, top: 206, bottom: 262);
+		legendLayer.AddChild(_legend);
+
+		_cannon = Bank(NavalSynth.Cannon);
+		_splash = Bank(NavalSynth.Splash);
+		_hitSound = Bank(NavalSynth.Hit);
+		_explosion = Bank(NavalSynth.Explosion);
+
+		_spin = new SpinControl(_rig, () => !_busy && !_settings.FreezeBoard);
 		_spin.Tapped += OnTapped;
+		_spin.TryGrab = TryGrabShip;
+		_spin.Dragged += DragShip;
+		_spin.Released += DropShip;
+		if (_clip != null)
+		{
+			_hud.Visible = false;
+			_ = PlayClip(_clip);
+			return;
+		}
 		StartGame();
+		if (!_demo)
+			_hud.OfferTutorialOnce(_settings);
+		_hud.ApplyDevFlags();
 	}
+
+	private static AudioStreamWav[] Bank(System.Func<int, float[]> make) =>
+		Enumerable.Range(1, 3).Select(seed => ImpactBank<int>.ToStream(make(seed))).ToArray();
+
+	private AudioStreamWav Pick(AudioStreamWav[] bank) => bank[_random.Next(bank.Length)];
 
 	// ---------------------------------------------------------------- World
 
@@ -177,20 +199,38 @@ public partial class Main : Node3D
 		};
 		_rig.AddChild(_deck);
 
-		// Water: a deep blue glass panel for each sea, with a fine grid over it.
+		// Water: a deep blue glass panel for each sea, with a clear grid drawn over it.
 		var water = Materials.For(new Look(Look.GlassPattern, new Color("1e5aa8"), new Color("6fb3ff"), 0.05f, Opacity: 0.85f));
-		var line = new StandardMaterial3D { AlbedoColor = new Color(0.8f, 0.9f, 1f, 0.25f), Transparency = BaseMaterial3D.TransparencyEnum.Alpha, ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded };
+		var grid = new ShaderMaterial { Shader = new Shader { Code = GridShader } };
+		grid.SetShaderParameter("cells", (float)Fleet.Size);
 		foreach (var sea in new[] { EnemyCenter, HomeCenter })
 		{
 			_rig.AddChild(new MeshInstance3D { Mesh = new BoxMesh { Size = new Vector3(SeaHalf * 2, 0.04f, SeaHalf * 2) }, MaterialOverride = water, Position = sea + new Vector3(0, 0.02f, 0) });
-			for (int i = 0; i <= Fleet.Size; i++)
-			{
-				float at = (i - 5) * Cell;
-				_rig.AddChild(new MeshInstance3D { Mesh = new BoxMesh { Size = new Vector3(0.015f, 0.005f, SeaHalf * 2) }, MaterialOverride = line, Position = sea + new Vector3(at, 0.045f, 0) });
-				_rig.AddChild(new MeshInstance3D { Mesh = new BoxMesh { Size = new Vector3(SeaHalf * 2, 0.005f, 0.015f) }, MaterialOverride = line, Position = sea + new Vector3(0, 0.045f, at) });
-			}
+			_rig.AddChild(new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(SeaHalf * 2, SeaHalf * 2) }, MaterialOverride = grid, Position = sea + new Vector3(0, 0.045f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off });
 		}
 	}
+
+	/// <summary>
+	/// The sea grid, drawn per pixel: every line is at least a couple of pixels wide however far
+	/// away it is (thin line meshes vanish in the distant sea), the border twice as bold.
+	/// </summary>
+	private const string GridShader = @"
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
+uniform float cells = 10.0;
+uniform vec4 line_color : source_color = vec4(0.88, 0.95, 1.0, 0.75);
+uniform float line_px = 2.0;
+uniform float edge_px = 4.0;
+void fragment() {
+	vec2 g = UV * cells;
+	vec2 w = max(fwidth(g), vec2(1e-4));
+	vec2 d = abs(fract(g - 0.5) - 0.5) / w;
+	float line = 1.0 - clamp(min(d.x, d.y) - line_px * 0.5 + 0.5, 0.0, 1.0);
+	vec2 e = min(g, cells - g) / w;
+	float edge = 1.0 - clamp(min(e.x, e.y) - edge_px * 0.5 + 0.5, 0.0, 1.0);
+	ALBEDO = line_color.rgb;
+	ALPHA = line_color.a * max(line, edge);
+}";
 
 	/// <summary>A ship: a hull with a pointed bow and a little bridge, lying along its squares.</summary>
 	private Node3D MakeHull(Ship ship, Vector3 sea)
@@ -201,13 +241,111 @@ public partial class Main : Node3D
 		float length = ship.Length * Cell - 0.08f;
 		node.AddChild(new MeshInstance3D { Mesh = new CapsuleMesh { Radius = Cell * 0.3f, Height = length, RadialSegments = 16, Rings = 4 }, MaterialOverride = material, RotationDegrees = new Vector3(0, 0, 90), Scale = new Vector3(1, 1, 0.55f), Position = new Vector3(0, 0.06f, 0) });
 		node.AddChild(new MeshInstance3D { Mesh = new BoxMesh { Size = new Vector3(Cell * 0.5f, 0.16f, Cell * 0.32f) }, MaterialOverride = material, Position = new Vector3(-length * 0.15f, 0.2f, 0) });
-		var first = SquareCenter(sea, ship.Row * Fleet.Size + ship.Column);
-		var last = SquareCenter(sea, ship.Squares().Last());
-		node.Position = (first + last) / 2 + new Vector3(0, 0.04f, 0);
+		node.Position = HullPosition(ship, sea);
 		node.RotationDegrees = new Vector3(0, ship.Across ? 0 : 90, 0);
 		_rig.AddChild(node);
 		return node;
 	}
+
+	private static Vector3 HullPosition(Ship ship, Vector3 sea)
+	{
+		var first = SquareCenter(sea, ship.Row * Fleet.Size + ship.Column);
+		var last = SquareCenter(sea, ship.Squares().Last());
+		return (first + last) / 2 + new Vector3(0, 0.04f, 0);
+	}
+
+	private static IEnumerable<MeshInstance3D> MeshesOf(Node3D node) => node.GetChildren().OfType<MeshInstance3D>();
+
+	// ---------------------------------------------------------------- Placing your fleet
+
+	/// <summary>The square of a sea under a screen point, or -1.</summary>
+	private int SquareAt(Vector2 screen, Vector3 sea)
+	{
+		var from = _camera.ProjectRayOrigin(screen);
+		var direction = _camera.ProjectRayNormal(screen);
+		if (direction.Y > -0.01f)
+			return -1;
+		var local = _rig.ToLocal(from + direction * (-from.Y / direction.Y)) - sea;
+		int column = Mathf.FloorToInt(local.X / Cell + 5), row = Mathf.FloorToInt(local.Z / Cell + 5);
+		return column is < 0 or >= Fleet.Size || row is < 0 or >= Fleet.Size ? -1 : row * Fleet.Size + column;
+	}
+
+	/// <summary>Before the first shot, a press on one of your ships picks it up (instead of spinning the board).</summary>
+	private bool TryGrabShip(Vector2 screen)
+	{
+		if (_started || _busy || _demo || _hud.MenuOpen)
+			return false;
+		int square = SquareAt(screen, HomeCenter);
+		if (square < 0 || _home.ShipAt(square) is not { } ship)
+			return false;
+		_held = ship;
+		_heldPivot = ship.Squares().ToList().IndexOf(square);
+		_heldTarget = ship;
+		var hull = _homeHulls[ship];
+		foreach (var mesh in MeshesOf(hull))
+			mesh.MaterialOverlay = Sparkle.Halo;
+		CreateTween().TweenProperty(hull, "position:y", HullPosition(ship, HomeCenter).Y + 0.25f, 0.1f);
+		return true;
+	}
+
+	/// <summary>The held ship follows the finger square by square, glowing where it fits and red where it doesn't.</summary>
+	private void DragShip(Vector2 screen)
+	{
+		if (_held is not { } ship)
+			return;
+		int square = SquareAt(screen, HomeCenter);
+		if (square < 0)
+			return;
+		int row = square / Fleet.Size, column = square % Fleet.Size;
+		var target = ship.Across ? ship.At(row, column - _heldPivot) : ship.At(row - _heldPivot, column);
+		if (target == _heldTarget)
+			return;
+		_heldTarget = target;
+		ShowHeld(target);
+	}
+
+	private void ShowHeld(Ship target)
+	{
+		var hull = _homeHulls[_held!];
+		hull.Position = HullPosition(target, HomeCenter) + new Vector3(0, 0.25f, 0);
+		hull.RotationDegrees = new Vector3(0, target.Across ? 0 : 90, 0);
+		bool fits = _home.CanPlace(target, ignoring: _held);
+		foreach (var mesh in MeshesOf(hull))
+			mesh.MaterialOverlay = fits ? Sparkle.Halo : BlockedOverlay;
+	}
+
+	/// <summary>Let go: the ship settles where it fits (or goes back). A tap without moving turns it.</summary>
+	private void DropShip(Vector2 screen, bool moved)
+	{
+		if (_held is not { } ship)
+			return;
+		var target = moved ? _heldTarget! : ship.Turned(_heldPivot);
+		var hull = _homeHulls[ship];
+		_homeHulls.Remove(ship);
+		bool placed = _home.TryReplace(ship, target);
+		var final = placed ? target : ship;
+		_homeHulls[final] = hull;
+		hull.RotationDegrees = new Vector3(0, final.Across ? 0 : 90, 0);
+		foreach (var mesh in MeshesOf(hull))
+			mesh.MaterialOverlay = null;
+		var settle = CreateTween();
+		settle.TweenProperty(hull, "position", HullPosition(final, HomeCenter), 0.12f).SetTrans(Tween.TransitionType.Quad).SetEase(Tween.EaseType.In);
+		Clack(HullPosition(final, HomeCenter), placed ? 0.6f : 0.3f);
+		if (!placed)
+			_hud.SetStatus(moved ? "Ships can't touch, even at a corner" : "No room to turn it there", Colors.White);
+		_held = null;
+		_heldTarget = null;
+		if (placed)
+			RefreshUi();
+	}
+
+	private static readonly StandardMaterial3D BlockedOverlay = new()
+	{
+		AlbedoColor = new Color(1f, 0.2f, 0.15f, 0.55f),
+		Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+		ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+		BlendMode = BaseMaterial3D.BlendModeEnum.Add,
+	};
 
 	private void DrawHomeFleet()
 	{
@@ -288,7 +426,8 @@ public partial class Main : Node3D
 		{
 			shell.Position = start.Lerp(target, t) + new Vector3(0, 3.2f * 4 * t * (1 - t), 0);
 		}), 0f, 1f, 0.6f).SetTrans(Tween.TransitionType.Sine).SetEase(Tween.EaseType.InOut);
-		_sound.Play(_impacts.Random(Style.Table), _rig.ToGlobal(start), -4f, 0.6f);
+		// Your guns are near you, theirs far across the table.
+		_sound.Play(Pick(_cannon), _rig.ToGlobal(start), atEnemy ? -3f : -8f, 0.95f + (float)_random.NextDouble() * 0.1f);
 		await ToSignal(flight, Tween.SignalName.Finished);
 		shell.QueueFree();
 
@@ -296,12 +435,12 @@ public partial class Main : Node3D
 		if (result == ShotResult.Miss)
 		{
 			Splash(target);
-			_sound.Play(_impacts.Random(Style.Glass), _rig.ToGlobal(target), -6f, 0.55f);
+			_sound.Play(Pick(_splash), _rig.ToGlobal(target), -2f, 0.95f + (float)_random.NextDouble() * 0.1f);
 		}
 		else
 		{
 			Sparkle.Burst(_rig, target + new Vector3(0, 0.2f, 0));
-			_sound.Play(_impacts.Random(Style.Metal), _rig.ToGlobal(target), 2f, 0.7f);
+			_sound.Play(Pick(_hitSound), _rig.ToGlobal(target), 0f, 0.95f + (float)_random.NextDouble() * 0.1f);
 			if (!atEnemy && _home.ShipAt(square) is { } hitShip && _homeHulls.TryGetValue(hitShip, out var hull))
 			{
 				// A brief flash on your ship where it was hit.
@@ -317,6 +456,7 @@ public partial class Main : Node3D
 		{
 			_over = true;
 			_wins.Win(first: atEnemy);
+			await SetWrecksAlight(beaten: atEnemy ? _enemyHulls : _homeHulls);
 		}
 		else if (result == ShotResult.Miss)
 		{
@@ -363,13 +503,16 @@ public partial class Main : Node3D
 		tween.TweenProperty(hull, "rotation:x", 0.6f, 0.5f);
 		tween.Parallel().TweenProperty(hull, "position:y", rest.Y - 0.12f, 0.6f).SetTrans(Tween.TransitionType.Quad).SetEase(Tween.EaseType.In);
 		Sparkle.Burst(_rig, rest + new Vector3(0, 0.4f, 0));
-		_sound.Play(_impacts.Random(Style.Table), hull.GlobalPosition, 4f, 0.45f);
+		_sound.Play(Pick(_explosion), hull.GlobalPosition, 3f);
 		_hud.SetStatus(enemy ? $"You sank their {ship.Name.ToLowerInvariant()}!" : $"They sank your {ship.Name.ToLowerInvariant()}!", enemy ? new Color("f5c542") : new Color("ff8a8a"));
 		await ToSignal(tween, Tween.SignalName.Finished);
 		foreach (var mesh in hull.GetChildren().OfType<MeshInstance3D>())
 			mesh.MaterialOverlay = null;
 		if (enemy)
+		{
 			_markers.Add(hull);
+			_enemyHulls[ship] = hull;
+		}
 		await Wait(0.4f);
 	}
 
@@ -382,7 +525,7 @@ public partial class Main : Node3D
 	{
 		float dt = (float)delta;
 		_spin.Process(dt);
-		if (_busy || _over)
+		if (_busy || _over || _clip != null)
 			return;
 		if (_playerTurn)
 		{
@@ -427,6 +570,9 @@ public partial class Main : Node3D
 	private void StartGame()
 	{
 		_computer.Cancel();
+		PutOutFire();
+		_enemyHulls.Clear();
+		_held = null;
 		foreach (var marker in _markers)
 			marker.QueueFree();
 		_markers.Clear();
@@ -441,6 +587,151 @@ public partial class Main : Node3D
 		_shots = 0;
 		_shuffle.Visible = !_demo;
 		RefreshUi();
+	}
+
+	/// <summary>Starting over mid-battle is a surrender (a loss), unless you watch an ad.</summary>
+	private void OnRestartPressed()
+	{
+		if (_busy)
+			return;
+		if (_over || !_started)
+		{
+			StartGame();
+			return;
+		}
+		_hud.AskRestart(!_demo, countLoss =>
+		{
+			if (countLoss)
+				_wins.Win(first: false);
+			StartGame();
+		}, then => _ads.ShowRewarded(rewarded: then, closed: () => { }));
+	}
+
+	// ---------------------------------------------------------------- The winner's fire
+
+	/// <summary>Victory: every wreck of the beaten fleet bursts into flames on the water, one after another.</summary>
+	private async Task SetWrecksAlight(Dictionary<Ship, Node3D> beaten)
+	{
+		int i = 0;
+		foreach (var (ship, hull) in beaten.OrderByDescending(pair => pair.Key.Length).ToList())
+		{
+			_fires.Add(Flames.SetAlight(_rig, hull.Position + new Vector3(0, 0.12f, 0), MeshesOf(hull),
+				radius: ship.Length * Cell * 0.32f, size: 0.8f + ship.Length * 0.12f, withLight: i == 0));
+			i++;
+			await Wait(0.18f);
+		}
+	}
+
+	private void PutOutFire()
+	{
+		foreach (var fire in _fires)
+			fire.Extinguish();
+		_fires.Clear();
+		foreach (var hull in _homeHulls.Values)
+		{
+			foreach (var mesh in MeshesOf(hull))
+				mesh.MaterialOverlay = null;
+		}
+	}
+
+	// ---------------------------------------------------------------- Tutorial clips
+
+	/// <summary>
+	/// Plays one scripted scene for the tutorial (with --clip=name; Record-Clips.ps1 records it),
+	/// then quits. The HUD is hidden; the fleet legend stays.
+	/// </summary>
+	private async Task PlayClip(string clip)
+	{
+		// The clip is square: frame the seas closer, with the legend along the very top.
+		_camera.Fov = 50;
+		_camera.LookAt(new Vector3(0, -0.4f, 0.1f));
+		Widgets.Anchor(_legend, Control.LayoutPreset.TopWide, left: 20, right: -20, top: 8, bottom: 64);
+		_settings.Muted = false;
+		var seeded = new System.Random(5);
+		_enemy.Clear();
+		_home.Clear();
+		_enemy.PlaceRandomly(seeded);
+		_home.PlaceRandomly(seeded);
+		DrawHomeFleet();
+		RefreshUi();
+		await Wait(0.8f);
+		switch (clip)
+		{
+			case "place":
+			{
+				// Pick a ship up, slide it along, set it down; then tap it to turn it.
+				var ship = _home.Ships.OrderBy(s => s.Length).First(s => _home.CanPlace(s.Turned(0), ignoring: s));
+				_held = ship;
+				_heldPivot = 0;
+				_heldTarget = ship;
+				foreach (var mesh in MeshesOf(_homeHulls[ship]))
+					mesh.MaterialOverlay = Sparkle.Halo;
+				await Wait(0.4f);
+				foreach (int step in Enumerable.Range(1, 3))
+				{
+					var slid = ship.Across ? ship.At(ship.Row, ship.Column - step) : ship.At(ship.Row - step, ship.Column);
+					if (!_home.CanPlace(slid, ignoring: ship))
+						break;
+					_heldTarget = slid;
+					ShowHeld(slid);
+					await Wait(0.35f);
+				}
+				DropShip(Vector2.Zero, moved: true);
+				await Wait(0.9f);
+				_held = _home.Ships.First(s => s.Name == ship.Name);
+				_heldPivot = 0;
+				DropShip(Vector2.Zero, moved: false);
+				await Wait(1.2f);
+				_home.Clear();
+				_home.PlaceRandomly(seeded);
+				DrawHomeFleet();
+				Clack(HomeCenter, 0.5f);
+				await Wait(1.2f);
+				break;
+			}
+			case "fire":
+			{
+				// A miss, then hits along a ship until it sinks.
+				var target = _enemy.Ships.First(s => s.Length == 3);
+				int miss = Enumerable.Range(0, Fleet.Squares).First(s => _enemy.ShipAt(s) == null && s / Fleet.Size > 3);
+				await Fire(miss, atEnemy: true);
+				_playerTurn = true;
+				await Wait(0.6f);
+				foreach (int square in target.Squares())
+				{
+					await Fire(square, atEnemy: true);
+					await Wait(0.5f);
+				}
+				await Wait(1.2f);
+				break;
+			}
+			default:
+			{
+				// The last ship goes down, and the beaten fleet burns.
+				var ships = _enemy.Ships.ToList();
+				foreach (var ship in ships.Take(ships.Count - 1))
+				{
+					foreach (int square in ship.Squares())
+					{
+						_enemy.Fire(square);
+						MakePeg(EnemyCenter, square, hit: true);
+					}
+					_enemyHulls[ship] = MakeHull(ship, EnemyCenter);
+					_markers.Add(_enemyHulls[ship]);
+				}
+				_started = true;
+				RefreshUi();
+				await Wait(0.6f);
+				foreach (int square in ships[^1].Squares())
+				{
+					await Fire(square, atEnemy: true);
+					await Wait(0.4f);
+				}
+				await Wait(2.8f);
+				break;
+			}
+		}
+		GetTree().Quit();
 	}
 
 	private bool CanRadar => !_busy && !_over && _playerTurn && _started;
@@ -481,6 +772,8 @@ public partial class Main : Node3D
 		_hud.SetScore($"Their ships {_enemy.ShipsLeft}   ·   yours {_home.ShipsLeft}   ·   wins {_wins.First}–{_wins.Second}");
 		_hud.SetNewGameVisible(_over && !_busy);
 		_hud.SetUndoVisible(CanRadar);
+		_hud.SetRestartVisible(!_over);
+		_legend.Set(_enemy.Ships.Select(ship => (ship.Name, ship.Length, _enemy.IsSunk(ship))));
 		if (_over)
 		{
 			bool won = _enemy.AllSunk;
@@ -491,7 +784,7 @@ public partial class Main : Node3D
 		}
 		if (!_started)
 		{
-			_hud.SetStatus("Shuffle your fleet, then fire!", new Color("fff3e0"));
+			_hud.SetStatus("Place your ships, then fire!", new Color("fff3e0"));
 			return;
 		}
 		string status = last switch
@@ -543,6 +836,9 @@ public partial class Main : Node3D
 					break;
 				case "--spin":
 					_initialSpin = Mathf.DegToRad(float.Parse(value, System.Globalization.CultureInfo.InvariantCulture));
+					break;
+				case "--clip":
+					_clip = value;
 					break;
 			}
 		}

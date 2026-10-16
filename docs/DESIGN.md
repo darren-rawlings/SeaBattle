@@ -9,11 +9,19 @@ other's sea; a hit lets you fire again. Sink the whole enemy fleet to win.
 
 ## Feel
 - Two glass seas on a deck in the chosen board material: the enemy's far away (hidden), yours
-  near with your fleet showing. Shuffle rearranges your fleet before the first shot.
+  near with your fleet showing. The grid is drawn per pixel, so its lines stay clear even in the
+  far sea.
+- Before the first shot, drag a ship to move it (it glows where it fits, red where it would
+  touch another) and tap it to turn it; or press Randomize.
 - Tap the far sea to fire: a shell arcs over the deck and lands with a splash and a white peg
   (miss) or a burst of sparks and a red peg (hit).
+- Synthesised sounds: the cannon's boom (louder for your guns, far off for theirs), a splash for
+  a miss, an iron clang and crunch for a hit, an explosion with a rumble and crackle for a sinking.
+- A legend under the top buttons shows the enemy ships still to sink, each as long as the ship;
+  sunk ones are dimmed and struck out.
+- Victory: the beaten fleet's wrecks catch fire on the water.
 - **Signature effect, the sinking:** a sunk ship rises out of the water, burning, then rolls over
-  and sinks with a low groan; enemy ships are only revealed this way.
+  and sinks; enemy ships are only revealed this way.
 - Drag sideways to spin the board.
 
 ## Levels (the computer's gunner)
@@ -25,4 +33,4 @@ remaining ships could lie, given all hits and misses).
 Between-games interstitial every 5th game. **Radar (ad)** briefly shows one square of an enemy ship.
 
 ## Later
-Placing ships by hand (drag and rotate); two players passing one phone; salvo mode.
+Two players passing one phone; salvo mode.
