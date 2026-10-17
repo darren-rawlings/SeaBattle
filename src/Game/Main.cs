@@ -163,6 +163,8 @@ public partial class Main : Node3D
 		_explosion = Bank(NavalSynth.Explosion);
 
 		_spin = new SpinControl(_rig, () => !_busy && !_settings.FreezeBoard);
+		// Freeze the board also turns it back to where it started.
+		_spin.Frozen = () => _settings.FreezeBoard && !_busy && _held == null;
 		_spin.Tapped += OnTapped;
 		_spin.TryGrab = TryGrabShip;
 		_spin.Dragged += DragShip;
