@@ -8,6 +8,10 @@
 
 config_version=5
 
+[admob]
+
+general/android/app_id="ca-app-pub-3310172999423635~3896523066"
+
 [application]
 
 config/name="Sea Battle"

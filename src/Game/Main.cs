@@ -27,7 +27,9 @@ public partial class Main : Node3D
 	public const string Title = "Sea Battle";
 
 	/// <summary>Google's test ad units until the real ones exist in AdMob (see the release playbook).</summary>
-	private static readonly AdMobConfig AdUnits = AdMobConfig.Test;
+	private static readonly AdMobConfig AdUnits = new(
+		InterstitialUnitId: "ca-app-pub-3310172999423635/6476078235",
+		RewardedUnitId: "ca-app-pub-3310172999423635/6641483785");
 
 	private const float Cell = 0.5f;
 	private const float SeaHalf = Fleet.Size * Cell / 2f;
